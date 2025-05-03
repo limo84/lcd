@@ -1,5 +1,6 @@
 #include <curses.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include <unistd.h>
 #include <sys/ptrace.h>
@@ -10,32 +11,53 @@
 #include <dwarf.h>
 #include <libdwarf/libdwarf.h>
 
-void run_debugger(pid_t child_pid) {
+void run_debugger(pid_t child_pid, uint64_t addr) {
   int wait_status;
-  unsigned icounter = 0;
+  struct user_regs_struct regs;
   printf("debugger started\n");
 
   /* Wait for child to stop on its first instruction */
   wait(&wait_status);
 
-  while (WIFSTOPPED(wait_status)) {
-    icounter++;
-    struct user_regs_struct regs;
-    ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
-    unsigned instr = ptrace(PTRACE_PEEKTEXT, child_pid, regs.rip, 0);
+  ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+  printf("Child started. EIP = %p\n", regs.rip);
 
-    printf("icounter = %u, EIP? = 0x%08x, instr = 0x%08x, edx = %u\n", 
-        icounter, regs.rip, instr, regs.rdx);
+  long data = ptrace(PTRACE_PEEKTEXT, child_pid, (void*)addr, 0);
+  printf("Original data at %p: %p\n", addr, data);
 
-    /* Make the child execute another instruction */
-    if (ptrace(PTRACE_SINGLESTEP, child_pid, 0, 0) < 0) {
-      perror("ptrace");
-        return;
-    }
-    /* Wait for child to stop on its next instruction */
-    wait(&wait_status);
+  long data_with_trap = (data & ~0xFF) | 0xCC;
+  ptrace(PTRACE_POKETEXT, child_pid, (void*)addr, (void*)data_with_trap);
+
+  long readback_data = ptrace(PTRACE_PEEKTEXT, child_pid, (void*)addr, 0);
+  printf("After trap, data at %p: %p\n", addr, readback_data);
+  
+  ptrace(PTRACE_CONT, child_pid, 0, 0);
+  
+  wait(&wait_status);
+  if (WIFSTOPPED(wait_status)) {
+    printf("Child got a signal...\n");
   }
-  printf("the child executed %u instructions\n", icounter);
+
+  ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+  printf("Child stopped at EIP = %p\n", regs.rip);
+
+  /* Remove the breakpoint by restoring the previous data
+  ** at the target address, and unwind the EIP back by 1 to 
+  ** let the CPU execute the original instruction that was 
+  ** there.
+  */
+  ptrace(PTRACE_POKETEXT, child_pid, (void*) addr, (void*)data);
+  regs.rip -= 1;
+  ptrace(PTRACE_SETREGS, child_pid, 0, &regs);
+  
+  printf("EIP: %p, rax: %p, rbx: %p \n", regs.rip, regs.rax, regs.rbx);
+
+  ptrace(PTRACE_CONT, child_pid, 0, 0);
+  wait(&wait_status);
+
+  if (WIFEXITED(wait_status)) {
+    printf("Child exited\n");
+  }
 }
 
 
@@ -43,18 +65,15 @@ int main(int argc, char *argv[]) {
 
   Dwarf_Debug dbg = 0;
 
-  if (argc < 2) {
-    printf("Program name not specified\n");
-    return -1;
+  if (argc < 3) {
+    printf("Usage: %s <target> <address>\n", argv[0]);
+    return 0;
   }
 
   char *prog = argv[1];
-  printf("prog: %s\n", prog);
 
   pid_t pid = fork();
   if (pid == 0) {
-    
-    printf("child_pid: %d\n", pid); 
     
     //we're in the child process
     //execute debugee
@@ -62,8 +81,8 @@ int main(int argc, char *argv[]) {
     execl(prog, prog, NULL);
   }
   else if (pid >= 1)  {
-    printf("lcd_pid: %d\n", pid);
-    run_debugger(pid);
+    uint64_t addr = (uint64_t) strtol(argv[2], NULL, 16);
+    run_debugger(pid, addr);
     //we're in the parent process
     //execute debugger
   }
