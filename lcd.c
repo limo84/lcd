@@ -1,6 +1,7 @@
 #include <curses.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h> // for open()
 
 #include <unistd.h>
 #include <sys/ptrace.h>
@@ -10,6 +11,69 @@
 
 #include <dwarf.h>
 #include <libdwarf/libdwarf.h>
+
+
+void read_cu_list(Dwarf_Debug dbg)
+{  
+  Dwarf_Unsigned cu_header_length = 0;
+  Dwarf_Half version_stamp = 0;
+  Dwarf_Unsigned abbrev_offset = 0;
+  Dwarf_Half address_size = 0;
+  Dwarf_Unsigned next_cu_header = 0;
+  Dwarf_Error error;
+  int cu_number = 0;
+
+  for (;; ++cu_number) {
+    Dwarf_Die no_die = 0;
+    Dwarf_Die cu_die = 0;
+    int res = DW_DLV_ERROR;
+    res = dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
+        &abbrev_offset, &address_size, &next_cu_header, &error);
+
+    if (res == DW_DLV_ERROR) {
+      printf("Error in dwarf_next_cu_header\n");
+      exit(1);
+    }
+    if (res == DW_DLV_NO_ENTRY) {
+      printf("DONE - cu_number = %d\n", cu_number);
+      return;
+    }
+  }
+}
+
+void run_dwarf(char* prog) {
+  
+  printf("Dwarf started\n");
+  
+  Dwarf_Debug dbg = 0;
+  int fd = -1;
+  const char *filepath = NULL;
+  int res = DW_DLV_ERROR;
+  Dwarf_Error error;
+  Dwarf_Handler errhand = 0;
+  Dwarf_Ptr errarg = 0;
+
+  fd = open(prog, O_RDONLY);
+  if (fd < 0) {
+    printf("Cant open %s\n", prog);
+  }
+
+  res = dwarf_init(fd, DW_DLC_READ, errhand, errarg, &dbg, &error);
+  if (res != DW_DLV_OK) {
+    printf("Cant do dwarf stuff\n");
+    exit(1);
+  }
+
+  read_cu_list(dbg);
+
+  res = dwarf_finish(dbg, &error);
+  if (res != DW_DLV_OK) {
+    printf("dwarf_finish failed!\n");
+  }
+  close(fd);
+
+
+}
 
 void run_debugger(pid_t child_pid, uint64_t addr) {
   int wait_status;
@@ -72,6 +136,8 @@ int main(int argc, char *argv[]) {
 
   char *prog = argv[1];
 
+  run_dwarf (prog);
+
   pid_t pid = fork();
   if (pid == 0) {
     
@@ -82,8 +148,7 @@ int main(int argc, char *argv[]) {
   }
   else if (pid >= 1)  {
     uint64_t addr = (uint64_t) strtol(argv[2], NULL, 16);
+    //run_dwarf (pid);
     run_debugger(pid, addr);
-    //we're in the parent process
-    //execute debugger
   }
 }
